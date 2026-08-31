@@ -1,18 +1,38 @@
-FROM registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.26-openshift-5.0 AS builder
+# Build the manager binary
+FROM ghcr.io/kedacore/keda-tools:1.26.2 as builder
 
 ARG BUILD_VERSION=main
 ARG GIT_COMMIT=HEAD
+ARG GIT_VERSION=main
 
 WORKDIR /workspace
-COPY . .
 
-RUN CGO_ENABLED=0 go build -mod=vendor \
-    -ldflags "-X=github.com/kedacore/keda-olm-operator/version.GitCommit=${GIT_COMMIT} -X=github.com/kedacore/keda-olm-operator/version.Version=${BUILD_VERSION}" \
-    -o bin/manager cmd/main.go
+# Copy the Go Modules manifests
+COPY go.mod go.mod
+COPY go.sum go.sum
+# cache deps before building and copying source so that we don't need to re-download as much
+# and so that source changes don't invalidate our downloaded layer
+RUN go mod download
 
-FROM registry.ci.openshift.org/ocp/5.0:base-rhel9
-COPY --from=builder /workspace/resources/keda.yaml /workspace/resources/keda.yaml
-COPY --from=builder /workspace/resources/keda-olm-operator.yaml /workspace/resources/keda-olm-operator.yaml
-COPY --from=builder /workspace/resources/keda-http-addon.yaml /workspace/resources/keda-http-addon.yaml
-COPY --from=builder /workspace/bin/manager /usr/bin/
-ENTRYPOINT ["/usr/bin/manager"]
+COPY Makefile Makefile
+
+# Copy the go source
+COPY hack/ hack/
+COPY version/ version/
+COPY cmd/main.go cmd/main.go
+COPY api/ api/
+COPY internal/controller/ internal/controller/
+COPY resources/ resources/
+
+# Build
+RUN VERSION=${BUILD_VERSION} GIT_COMMIT=${GIT_COMMIT} GIT_VERSION=${GIT_VERSION} make build
+
+# Use distroless as minimal base image to package the manager binary
+# Refer to https://github.com/GoogleContainerTools/distroless for more details
+FROM gcr.io/distroless/static:nonroot
+WORKDIR /
+COPY --from=builder /workspace/bin/manager .
+# 65532 is numeric for nonroot
+USER 65532:65532
+
+ENTRYPOINT ["/manager"]
